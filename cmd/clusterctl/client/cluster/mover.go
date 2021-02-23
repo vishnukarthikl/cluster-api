@@ -36,36 +36,27 @@ import (
 // ObjectMover defines methods for moving Cluster API objects to another management cluster.
 type ObjectMover interface {
 	// Move moves all the Cluster API objects existing in a namespace (or from all the namespaces if empty) to a target management cluster.
-	Move(namespace string, toCluster Client, dryRun bool) error
+	Move(namespace string, toCluster Client) error
 }
 
 // objectMover implements the ObjectMover interface.
 type objectMover struct {
 	fromProxy             Proxy
 	fromProviderInventory InventoryClient
-	dryRun                bool
 }
 
 // ensure objectMover implements the ObjectMover interface.
 var _ ObjectMover = &objectMover{}
 
-func (o *objectMover) Move(namespace string, toCluster Client, dryRun bool) error {
+func (o *objectMover) Move(namespace string, toCluster Client) error {
 	log := logf.Log
 	log.Info("Performing move...")
-	o.dryRun = dryRun
-	if o.dryRun {
-		log.Info("********************************************************")
-		log.Info("This is a dry-run move, will not perform any real action")
-		log.Info("********************************************************")
-	}
 
 	objectGraph := newObjectGraph(o.fromProxy)
 
 	// checks that all the required providers in place in the target cluster.
-	if !o.dryRun {
-		if err := o.checkTargetProviders(namespace, toCluster.ProviderInventory()); err != nil {
-			return err
-		}
+	if err := o.checkTargetProviders(namespace, toCluster.ProviderInventory()); err != nil {
+		return err
 	}
 
 	// Gets all the types defines by the CRDs installed by clusterctl plus the ConfigMap/Secret core types.
@@ -93,12 +84,7 @@ func (o *objectMover) Move(namespace string, toCluster Client, dryRun bool) erro
 	objectGraph.checkVirtualNode()
 
 	// Move the objects to the target cluster.
-	var proxy Proxy
-	if !o.dryRun {
-		proxy = toCluster.Proxy()
-	}
-
-	if err := o.move(objectGraph, proxy); err != nil {
+	if err := o.move(objectGraph, toCluster.Proxy()); err != nil {
 		return err
 	}
 
@@ -114,10 +100,6 @@ func newObjectMover(fromProxy Proxy, fromProviderInventory InventoryClient) *obj
 
 // checkProvisioningCompleted checks if Cluster API has already completed the provisioning of the infrastructure for the objects involved in the move operation.
 func (o *objectMover) checkProvisioningCompleted(graph *objectGraph) error {
-
-	if o.dryRun {
-		return nil
-	}
 	errList := []error{}
 
 	// Checking all the clusters have infrastructure is ready
@@ -214,7 +196,7 @@ func (o *objectMover) move(graph *objectGraph, toProxy Proxy) error {
 
 	// Sets the pause field on the Cluster object in the source management cluster, so the controllers stop reconciling it.
 	log.V(1).Info("Pausing the source cluster")
-	if err := setClusterPause(o.fromProxy, clusters, true, o.dryRun); err != nil {
+	if err := setClusterPause(o.fromProxy, clusters, true); err != nil {
 		return err
 	}
 
@@ -249,7 +231,7 @@ func (o *objectMover) move(graph *objectGraph, toProxy Proxy) error {
 
 	// Reset the pause field on the Cluster object in the target management cluster, so the controllers start reconciling it.
 	log.V(1).Info("Resuming the target cluster")
-	if err := setClusterPause(toProxy, clusters, false, o.dryRun); err != nil {
+	if err := setClusterPause(toProxy, clusters, false); err != nil {
 		return err
 	}
 
@@ -332,11 +314,7 @@ func getMoveSequence(graph *objectGraph) *moveSequence {
 }
 
 // setClusterPause sets the paused field on nodes referring to Cluster objects.
-func setClusterPause(proxy Proxy, clusters []*node, value bool, dryRun bool) error {
-	if dryRun {
-		return nil
-	}
-
+func setClusterPause(proxy Proxy, clusters []*node, value bool) error {
 	log := logf.Log
 	patch := client.RawPatch(types.MergePatchType, []byte(fmt.Sprintf("{\"spec\":{\"paused\":%t}}", value)))
 
@@ -383,11 +361,6 @@ func patchCluster(proxy Proxy, cluster *node, patch client.Patch) error {
 
 // ensureNamespaces ensures all the expected target namespaces are in place before creating objects.
 func (o *objectMover) ensureNamespaces(graph *objectGraph, toProxy Proxy) error {
-
-	if o.dryRun {
-		return nil
-	}
-
 	ensureNamespaceBackoff := newWriteBackoff()
 	namespaces := sets.NewString()
 	for _, node := range graph.getMoveNodes() {
@@ -506,10 +479,6 @@ func (o *objectMover) createGroup(group moveGroup, toProxy Proxy) error {
 func (o *objectMover) createTargetObject(nodeToCreate *node, toProxy Proxy) error {
 	log := logf.Log
 	log.V(1).Info("Creating", nodeToCreate.identity.Kind, nodeToCreate.identity.Name, "Namespace", nodeToCreate.identity.Namespace)
-
-	if o.dryRun {
-		return nil
-	}
 
 	cFrom, err := o.fromProxy.NewClient()
 	if err != nil {
@@ -634,10 +603,6 @@ func (o *objectMover) deleteSourceObject(nodeToDelete *node) error {
 	log := logf.Log
 	log.V(1).Info("Deleting", nodeToDelete.identity.Kind, nodeToDelete.identity.Name, "Namespace", nodeToDelete.identity.Namespace)
 
-	if o.dryRun {
-		return nil
-	}
-
 	cFrom, err := o.fromProxy.NewClient()
 	if err != nil {
 		return err
@@ -679,10 +644,6 @@ func (o *objectMover) deleteSourceObject(nodeToDelete *node) error {
 
 // checkTargetProviders checks that all the providers installed in the source cluster exists in the target cluster as well (with a version >= of the current version).
 func (o *objectMover) checkTargetProviders(namespace string, toInventory InventoryClient) error {
-	if o.dryRun {
-		return nil
-	}
-
 	// Gets the list of providers in the source/target cluster.
 	fromProviders, err := o.fromProviderInventory.List()
 	if err != nil {
